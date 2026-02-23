@@ -267,7 +267,7 @@ mod tests {
             }],
         };
 
-        let receipts = vec![valid.clone()];
+        let receipts = [valid.clone()];
         let receipts_with_bloom: Vec<_> = receipts.iter().map(|r| r.with_bloom_ref()).collect();
         let expected_root = calculate_receipt_root(&receipts_with_bloom);
         let expected_bloom =

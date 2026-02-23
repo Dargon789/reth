@@ -352,7 +352,7 @@ mod tests {
         for (index, receipt) in receipts.into_iter().enumerate() {
             handle.push_receipt(index, receipt);
         }
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         let (root, bloom) = handle.receipt_root_bloom().unwrap();
         assert_eq!(root, expected_root);
@@ -370,7 +370,7 @@ mod tests {
         for (index, receipt) in receipts.into_iter().enumerate().rev() {
             handle.push_receipt(index, receipt);
         }
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         let (root, bloom) = handle.receipt_root_bloom().unwrap();
         assert_eq!(root, expected_root);
@@ -397,7 +397,7 @@ mod tests {
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 1, None);
         handle.push_receipt(0, valid);
         handle.push_receipt(999, invalid);
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         assert_eq!(handle.receipt_root_bloom(), Some(expected));
     }
@@ -409,7 +409,7 @@ mod tests {
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 2, None);
         handle.push_receipt(0, Receipt::default());
         // Finish with only 1 of 2 receipts — root should be None.
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         assert!(handle.receipt_root_bloom().is_none());
     }
@@ -420,7 +420,7 @@ mod tests {
 
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 0, None);
         let expected = HashedPostState::default();
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         assert_eq!(handle.hashed_post_state(), &expected);
     }
@@ -433,7 +433,7 @@ mod tests {
         let expected = calculate_withdrawals_root(&withdrawals);
 
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 0, Some(withdrawals));
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         assert_eq!(handle.withdrawals_root(), Some(expected));
     }
@@ -458,8 +458,8 @@ mod tests {
             handle_b.push_receipt(index, receipt);
         }
 
-        handle_a.finish(|| HashedPostState::default());
-        handle_b.finish(|| HashedPostState::default());
+        handle_a.finish(HashedPostState::default);
+        handle_b.finish(HashedPostState::default);
 
         let (root_a, bloom_a) = handle_a.receipt_root_bloom().unwrap();
         let (root_b, bloom_b) = handle_b.receipt_root_bloom().unwrap();
@@ -482,7 +482,7 @@ mod tests {
         // Second block: succeeds
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 1, None);
         handle.push_receipt(0, Receipt::default());
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
         assert!(handle.receipt_root_bloom().is_some());
     }
 
@@ -491,7 +491,7 @@ mod tests {
         let rt = test_runtime();
 
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 0, None);
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         let lazy = handle.into_lazy_hashed_state();
         assert_eq!(lazy.get(), &HashedPostState::default());
@@ -507,7 +507,7 @@ mod tests {
         let rt = test_runtime();
 
         let mut handle = PostExecHandle::<Receipt>::new(&rt, 0, None);
-        handle.finish(|| HashedPostState::default());
+        handle.finish(HashedPostState::default);
 
         let lazy = handle.into_lazy_hashed_state();
         let _clone = lazy.clone();

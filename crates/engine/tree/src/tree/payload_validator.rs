@@ -489,8 +489,8 @@ where
         }
 
         // Execute the block and handle any execution errors.
-        // The receipt root task is spawned before execution and receives receipts incrementally
-        // as transactions complete, allowing parallel computation during execution.
+        // The post-exec worker is spawned before execution and receives receipts incrementally
+        // as transactions complete, allowing receipt-root finalization to overlap execution.
         let (output, senders, mut post_exec) =
             match self.execute_block(state_provider, env, &input, &mut handle) {
                 Ok(output) => output,
@@ -805,7 +805,7 @@ where
         }
 
         let receipts_len = input.transaction_count();
-        // Spawn background task to compute receipt root and logs bloom incrementally.
+        // Spawn a single post-exec worker for receipt root, withdrawals root, and hashed state.
         let post_exec = self
             .payload_processor
             .post_exec_handle(receipts_len, input.withdrawals().map(|w| w.to_vec()));
@@ -849,7 +849,7 @@ where
     /// This method handles:
     /// - Applying pre-execution changes (e.g., beacon root updates)
     /// - Executing each transaction with timing metrics
-    /// - Streaming receipts to the receipt root computation task
+    /// - Streaming receipts to the post-exec worker
     /// - Collecting transaction senders for later use
     ///
     /// Returns the executor (for finalization) and the collected senders.
@@ -1191,6 +1191,7 @@ where
     ///
     /// The `post_exec` handle wraps background receipt-root and hashed post state computations.
     #[instrument(level = "debug", target = "engine::tree::payload_validator", skip_all)]
+    #[expect(clippy::too_many_arguments)]
     fn validate_post_execution<T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &self,
         block: &RecoveredBlock<N::Block>,
