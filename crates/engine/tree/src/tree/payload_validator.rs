@@ -509,8 +509,8 @@ where
         // needed. This frees up resources while state root computation continues.
         let valid_block_tx = handle.terminate_caching(Some(output.clone()));
 
-        // Send Done event to the post-exec worker, which will finalize receipt root
-        // and compute hashed post state in the same background thread.
+        // Spawn hashed-post-state on a separate thread (runs in parallel with
+        // receipt-root finalization). Dropping the channel closes the receipt stream.
         let hashed_state_output = output.clone();
         let hashed_state_provider = self.provider.clone();
         post_exec.finish(move || {
@@ -525,11 +525,6 @@ where
         let block = convert_to_block(input)?.with_senders(senders);
 
         let receipt_root_bloom = post_exec.receipt_root_bloom();
-        debug_assert_eq!(
-            post_exec.withdrawals_root(),
-            block.withdrawals_root(),
-            "post-exec withdrawals root does not match block header"
-        );
         let hashed_state = post_exec.into_lazy_hashed_state();
 
         let hashed_state = ensure_ok_post_block!(
@@ -808,12 +803,8 @@ where
         }
 
         let transaction_count = input.transaction_count();
-        #[cfg(debug_assertions)]
-        let withdrawals = input.withdrawals().map(|w| w.to_vec());
-        #[cfg(not(debug_assertions))]
-        let withdrawals: Option<Vec<_>> = None;
-        // Spawn a single post-exec worker for receipt root, withdrawals root, and hashed state.
-        let post_exec = self.payload_processor.post_exec_handle(transaction_count, withdrawals);
+        // Spawn a single post-exec worker for receipt root and hashed state.
+        let post_exec = self.payload_processor.post_exec_handle(transaction_count);
         let executor = executor.with_state_hook(Some(Box::new(handle.state_hook())));
 
         let execution_start = Instant::now();
@@ -1845,7 +1836,7 @@ mod tests {
         let runtime = reth_tasks::Runtime::test();
         let receipts = vec![Receipt::default(), Receipt::default()];
 
-        let mut post_exec = PostExecHandle::<Receipt>::new(&runtime, receipts.len(), None);
+        let mut post_exec = PostExecHandle::<Receipt>::new(&runtime, receipts.len());
 
         // Simulate the tx loop streaming receipts available before finish.
         stream_receipts_to_post_exec(&post_exec, &receipts[..1], 0);

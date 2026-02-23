@@ -180,12 +180,8 @@ where
 
     /// Creates a new post-execution handle for a block, immediately spawning the
     /// single event-driven post-exec background worker.
-    pub fn post_exec_handle(
-        &self,
-        receipts_len: usize,
-        withdrawals: Option<Vec<Withdrawal>>,
-    ) -> post_exec::PostExecHandle<N::Receipt> {
-        post_exec::PostExecHandle::new(&self.executor, receipts_len, withdrawals)
+    pub fn post_exec_handle(&self, receipts_len: usize) -> post_exec::PostExecHandle<N::Receipt> {
+        post_exec::PostExecHandle::new(&self.executor, receipts_len)
     }
 }
 
