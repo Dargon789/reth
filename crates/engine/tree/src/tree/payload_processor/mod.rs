@@ -105,18 +105,12 @@ type IteratorPayloadHandle<Evm, I, N> = PayloadHandle<
     <N as NodePrimitives>::Receipt,
 >;
 
-/// Type alias for the shared post-execution coordinator.
-type PostExecCoordinatorFor<Evm> =
-    post_exec::PostExecCoordinator<<<Evm as ConfigureEvm>::Primitives as NodePrimitives>::Receipt>;
-
 /// Entrypoint for executing the payload.
 #[derive(Debug)]
 pub struct PayloadProcessor<Evm>
 where
     Evm: ConfigureEvm,
 {
-    /// Shared worker that computes incremental post-execution roots.
-    post_exec_coordinator: PostExecCoordinatorFor<Evm>,
     /// The executor used by to spawn tasks.
     executor: Runtime,
     /// The most recent cache used for execution.
@@ -166,9 +160,7 @@ where
         config: &TreeConfig,
         precompile_cache_map: PrecompileCacheMap<SpecFor<Evm>>,
     ) -> Self {
-        let post_exec_coordinator = post_exec::PostExecCoordinator::new();
         Self {
-            post_exec_coordinator,
             executor,
             execution_cache: Default::default(),
             trie_metrics: Default::default(),
@@ -186,12 +178,14 @@ where
         }
     }
 
-    /// Starts a new post-execution receipt-root stream for a block.
-    pub fn begin_post_exec_block(
+    /// Creates a new post-execution handle for a block, immediately spawning the
+    /// single event-driven post-exec background worker.
+    pub fn post_exec_handle(
         &self,
         receipts_len: usize,
-    ) -> post_exec::PostExecBlockHandle<N::Receipt> {
-        self.post_exec_coordinator.begin_block(receipts_len)
+        withdrawals: Option<Vec<Withdrawal>>,
+    ) -> post_exec::PostExecHandle<N::Receipt> {
+        post_exec::PostExecHandle::new(&self.executor, receipts_len, withdrawals)
     }
 }
 

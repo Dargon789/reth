@@ -18,7 +18,7 @@ use alloy_primitives::B256;
 #[cfg(feature = "trie-debug")]
 use reth_trie_sparse::debug_recorder::TrieDebugRecorder;
 
-use crate::tree::payload_processor::post_exec::PostExecBlockHandle;
+use crate::tree::payload_processor::post_exec::{LazyHashedPostState, PostExecHandle};
 use reth_chain_state::{CanonicalInMemoryState, DeferredTrieData, ExecutedBlock, LazyOverlay};
 use reth_consensus::{ConsensusError, FullConsensus, ReceiptRootBloom};
 use reth_engine_primitives::{
@@ -43,7 +43,7 @@ use reth_provider::{
     StateProviderFactory, StateReader, StorageChangeSetReader, StorageSettingsCache,
 };
 use reth_revm::db::{states::bundle_state::BundleRetention, State};
-use reth_trie::{updates::TrieUpdates, HashedPostState, StateRoot};
+use reth_trie::{updates::TrieUpdates, StateRoot};
 use reth_trie_db::ChangesetCache;
 use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
 use revm_primitives::Address;
@@ -53,9 +53,6 @@ use std::{
     sync::{mpsc::RecvTimeoutError, Arc},
 };
 use tracing::{debug, debug_span, error, info, instrument, trace, warn};
-
-/// Handle to a [`HashedPostState`] computed on a background thread.
-type LazyHashedPostState = reth_tasks::LazyHandle<HashedPostState>;
 
 /// Context providing access to tree state during validation.
 ///
@@ -494,7 +491,7 @@ where
         // Execute the block and handle any execution errors.
         // The receipt root task is spawned before execution and receives receipts incrementally
         // as transactions complete, allowing parallel computation during execution.
-        let (output, senders, receipt_root_rx) =
+        let (output, senders, mut post_exec) =
             match self.execute_block(state_provider, env, &input, &mut handle) {
                 Ok(output) => output,
                 Err(err) => return self.handle_execution_error(input, err, &parent_block),
@@ -512,33 +509,24 @@ where
         // needed. This frees up resources while state root computation continues.
         let valid_block_tx = handle.terminate_caching(Some(output.clone()));
 
-        // Spawn hashed post state computation in background so it runs concurrently with
-        // block conversion and receipt root computation. This is a pure CPU-bound task
-        // (keccak256 hashing of all changed addresses and storage slots).
+        // Send Done event to the post-exec worker, which will finalize receipt root
+        // and compute hashed post state in the same background thread.
         let hashed_state_output = output.clone();
         let hashed_state_provider = self.provider.clone();
-        let hashed_state: LazyHashedPostState =
-            self.payload_processor.executor().spawn_blocking_named("hash-post-state", move || {
-                let _span = debug_span!(
-                    target: "engine::tree::payload_validator",
-                    "hashed_post_state",
-                )
-                .entered();
-                hashed_state_provider.hashed_post_state(&hashed_state_output.state)
-            });
+        post_exec.finish(move || {
+            let _span = debug_span!(
+                target: "engine::tree::payload_validator",
+                "hashed_post_state",
+            )
+            .entered();
+            hashed_state_provider.hashed_post_state(&hashed_state_output.state)
+        });
 
         let block = convert_to_block(input)?.with_senders(senders);
 
-        // Wait for the receipt root computation to complete.
-        let receipt_root_bloom = receipt_root_rx
-            .blocking_recv()
-            .inspect_err(|_| {
-                tracing::error!(
-                    target: "engine::tree::payload_validator",
-                    "Receipt root task dropped sender without result, receipt root calculation likely aborted"
-                );
-            })
-            .ok();
+        let receipt_root_bloom = post_exec.receipt_root_bloom();
+        let withdrawals_root = post_exec.withdrawals_root();
+        let hashed_state = post_exec.into_lazy_hashed_state();
 
         let hashed_state = ensure_ok_post_block!(
             self.validate_post_execution(
@@ -547,6 +535,7 @@ where
                 &output,
                 &mut ctx,
                 receipt_root_bloom,
+                withdrawals_root,
                 hashed_state,
             ),
             block
@@ -767,11 +756,7 @@ where
         input: &BlockOrPayload<T>,
         handle: &mut PayloadHandle<impl ExecutableTxFor<Evm>, Err, N::Receipt>,
     ) -> Result<
-        (
-            BlockExecutionOutput<N::Receipt>,
-            Vec<Address>,
-            tokio::sync::oneshot::Receiver<(B256, alloy_primitives::Bloom)>,
-        ),
+        (BlockExecutionOutput<N::Receipt>, Vec<Address>, PostExecHandle<N::Receipt>),
         InsertBlockErrorKind,
     >
     where
@@ -820,7 +805,10 @@ where
         }
 
         let receipts_len = input.transaction_count();
-        let receipt_root_handle = self.payload_processor.begin_post_exec_block(receipts_len);
+        // Spawn background task to compute receipt root and logs bloom incrementally.
+        let post_exec = self
+            .payload_processor
+            .post_exec_handle(receipts_len, input.withdrawals().map(|w| w.to_vec()));
 
         let transaction_count = input.transaction_count();
         let executor = executor.with_state_hook(Some(Box::new(handle.state_hook())));
@@ -832,9 +820,8 @@ where
             executor,
             transaction_count,
             handle.iter_transactions(),
-            &receipt_root_handle,
+            &post_exec,
         )?;
-        let result_rx = receipt_root_handle.finalize();
 
         // Finish execution and get the result
         let post_exec_start = Instant::now();
@@ -854,7 +841,7 @@ where
         self.metrics.record_block_execution_gas_bucket(output.result.gas_used, execution_duration);
 
         debug!(target: "engine::tree::payload_validator", elapsed = ?execution_duration, "Executed block");
-        Ok((output, senders, result_rx))
+        Ok((output, senders, post_exec))
     }
 
     /// Executes transactions and collects senders, streaming receipts to the post-exec worker.
@@ -871,7 +858,7 @@ where
         mut executor: E,
         transaction_count: usize,
         transactions: impl Iterator<Item = Result<Tx, Err>>,
-        receipt_root_handle: &PostExecBlockHandle<N::Receipt>,
+        post_exec: &PostExecHandle<N::Receipt>,
     ) -> Result<(E, Vec<Address>), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt>,
@@ -920,13 +907,13 @@ where
 
             let current_len = executor.receipts().len();
             if current_len > last_sent_len {
-                last_sent_len = current_len;
-                // Stream the latest receipt to the background worker for incremental root
-                // computation.
-                if let Some(receipt) = executor.receipts().last() {
-                    let tx_index = current_len - 1;
-                    receipt_root_handle.push_receipt(tx_index, receipt.clone());
+                // Some executors may append multiple receipts in one step.
+                // Stream all newly appended receipts to keep post-exec indexing contiguous.
+                let receipts = executor.receipts();
+                for (offset, receipt) in receipts[last_sent_len..current_len].iter().enumerate() {
+                    post_exec.push_receipt(last_sent_len + offset, receipt.clone());
                 }
+                last_sent_len = current_len;
             }
         }
         drop(exec_span);
@@ -1200,7 +1187,9 @@ where
     /// If `receipt_root_bloom` is provided, it will be used instead of computing the receipt root
     /// and logs bloom from the receipts.
     ///
-    /// The `hashed_state` handle wraps the background hashed post state computation.
+    /// If `withdrawals_root` is provided, it is checked against the block header in debug builds.
+    ///
+    /// The `post_exec` handle wraps background receipt-root and hashed post state computations.
     #[instrument(level = "debug", target = "engine::tree::payload_validator", skip_all)]
     fn validate_post_execution<T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &self,
@@ -1209,6 +1198,7 @@ where
         output: &BlockExecutionOutput<N::Receipt>,
         ctx: &mut TreeCtx<'_, N>,
         receipt_root_bloom: Option<ReceiptRootBloom>,
+        withdrawals_root: Option<B256>,
         hashed_state: LazyHashedPostState,
     ) -> Result<LazyHashedPostState, InsertBlockErrorKind>
     where
@@ -1244,6 +1234,12 @@ where
             return Err(err.into())
         }
         drop(_enter);
+
+        debug_assert_eq!(
+            withdrawals_root,
+            block.withdrawals_root(),
+            "post-exec withdrawals root does not match block header"
+        );
 
         let _enter = debug_span!(target: "engine::tree::payload_validator", "validate_block_post_execution_with_hashed_state").entered();
         if let Err(err) = self
