@@ -805,10 +805,10 @@ where
         }
 
         let receipts_len = input.transaction_count();
+        let withdrawals =
+            if cfg!(debug_assertions) { input.withdrawals().map(|w| w.to_vec()) } else { None };
         // Spawn a single post-exec worker for receipt root, withdrawals root, and hashed state.
-        let post_exec = self
-            .payload_processor
-            .post_exec_handle(receipts_len, input.withdrawals().map(|w| w.to_vec()));
+        let post_exec = self.payload_processor.post_exec_handle(receipts_len, withdrawals);
 
         let transaction_count = input.transaction_count();
         let executor = executor.with_state_hook(Some(Box::new(handle.state_hook())));

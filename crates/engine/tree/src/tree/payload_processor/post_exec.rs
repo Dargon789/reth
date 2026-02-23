@@ -77,14 +77,14 @@ impl<R: Receipt + 'static> PostExecHandle<R> {
     /// Streams one receipt to the background worker.
     #[inline]
     pub fn push_receipt(&self, index: usize, receipt: R) {
-        if self.tx.as_ref().is_some_and(|tx| {
-            tx.send(PostExecEvent::Receipt(IndexedReceipt::new(index, receipt))).is_err()
-        }) {
-            error!(
-                target: "engine::tree::payload_processor",
-                index,
-                "post-exec worker dropped before receipt event",
-            );
+        if let Some(tx) = self.tx.as_ref() {
+            if tx.send(PostExecEvent::Receipt(IndexedReceipt::new(index, receipt))).is_err() {
+                error!(
+                    target: "engine::tree::payload_processor",
+                    index,
+                    "post-exec worker dropped before receipt event",
+                );
+            }
         }
     }
 
@@ -94,7 +94,12 @@ impl<R: Receipt + 'static> PostExecHandle<R> {
     /// the hashed post state. Must be called after all receipts have been pushed.
     pub fn finish(&mut self, f: impl FnOnce() -> HashedPostState + Send + 'static) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(PostExecEvent::Done(Box::new(f)));
+            if tx.send(PostExecEvent::Done(Box::new(f))).is_err() {
+                error!(
+                    target: "engine::tree::payload_processor",
+                    "post-exec worker dropped before finish event"
+                );
+            }
         }
     }
 
