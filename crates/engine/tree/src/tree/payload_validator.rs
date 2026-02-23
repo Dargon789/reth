@@ -525,7 +525,8 @@ where
         let block = convert_to_block(input)?.with_senders(senders);
 
         let receipt_root_bloom = post_exec.receipt_root_bloom();
-        let withdrawals_root = post_exec.withdrawals_root();
+        let withdrawals_root =
+            if cfg!(debug_assertions) { post_exec.withdrawals_root() } else { None };
         let hashed_state = post_exec.into_lazy_hashed_state();
 
         let hashed_state = ensure_ok_post_block!(
@@ -804,13 +805,11 @@ where
             });
         }
 
-        let receipts_len = input.transaction_count();
+        let transaction_count = input.transaction_count();
         let withdrawals =
             if cfg!(debug_assertions) { input.withdrawals().map(|w| w.to_vec()) } else { None };
         // Spawn a single post-exec worker for receipt root, withdrawals root, and hashed state.
-        let post_exec = self.payload_processor.post_exec_handle(receipts_len, withdrawals);
-
-        let transaction_count = input.transaction_count();
+        let post_exec = self.payload_processor.post_exec_handle(transaction_count, withdrawals);
         let executor = executor.with_state_hook(Some(Box::new(handle.state_hook())));
 
         let execution_start = Instant::now();
