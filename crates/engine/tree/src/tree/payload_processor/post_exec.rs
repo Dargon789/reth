@@ -29,6 +29,7 @@ use tracing::error;
 ///
 /// Results are stored in shared [`OnceLock`] fields and resolved lazily via
 /// [`OnceLock::wait`].
+#[must_use]
 pub struct PostExecHandle<R> {
     tx: Option<CrossbeamSender<PostExecEvent<R>>>,
     receipt_root_bloom: Arc<OnceLock<Option<(B256, Bloom)>>>,
@@ -38,7 +39,7 @@ pub struct PostExecHandle<R> {
 
 impl<R> core::fmt::Debug for PostExecHandle<R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PostExecHandle").finish()
+        f.debug_struct("PostExecHandle").field("finished", &self.tx.is_none()).finish()
     }
 }
 
@@ -148,8 +149,8 @@ enum PostExecEvent<R> {
 
 /// Handle to a [`HashedPostState`] computed on a background thread.
 ///
-/// Wraps the hashed-state result lock and provides a `LazyHandle`-compatible API so downstream
-/// code that calls `.get()`, `.clone()`, and `.try_into_inner()` continues to work.
+/// Wraps the hashed-state result lock. Blocks on first access via [`get`](Self::get) and
+/// caches the result for subsequent calls.
 #[derive(Clone)]
 pub struct LazyHashedPostState {
     hashed_post_state: Arc<OnceLock<Option<HashedPostState>>>,
@@ -285,6 +286,8 @@ fn run_post_exec_worker<R: Receipt>(
                 "Post-exec worker received incomplete receipts, execution likely aborted"
             );
             let _ = receipt_root_bloom.set(None);
+            // AbortGuard sets remaining OnceLocks to None.
+            return;
         }
     }
 
