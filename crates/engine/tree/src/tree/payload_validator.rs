@@ -34,7 +34,7 @@ use reth_payload_primitives::{
 };
 use reth_primitives_traits::{
     AlloyBlockHeader, BlockBody, BlockTy, FastInstant as Instant, GotExpected, NodePrimitives,
-    RecoveredBlock, SealedBlock, SealedHeader, SignerRecoverable,
+    Receipt, RecoveredBlock, SealedBlock, SealedHeader, SignerRecoverable,
 };
 use reth_provider::{
     providers::OverlayStateProviderFactory, BlockExecutionOutput, BlockNumReader, BlockReader,
@@ -525,8 +525,11 @@ where
         let block = convert_to_block(input)?.with_senders(senders);
 
         let receipt_root_bloom = post_exec.receipt_root_bloom();
-        let withdrawals_root =
-            if cfg!(debug_assertions) { post_exec.withdrawals_root() } else { None };
+        debug_assert_eq!(
+            post_exec.withdrawals_root(),
+            block.withdrawals_root(),
+            "post-exec withdrawals root does not match block header"
+        );
         let hashed_state = post_exec.into_lazy_hashed_state();
 
         let hashed_state = ensure_ok_post_block!(
@@ -536,7 +539,6 @@ where
                 &output,
                 &mut ctx,
                 receipt_root_bloom,
-                withdrawals_root,
                 hashed_state,
             ),
             block
@@ -815,7 +817,7 @@ where
         let execution_start = Instant::now();
 
         // Execute all transactions and finalize
-        let (executor, senders) = self.execute_transactions(
+        let (executor, senders, last_sent_receipt) = self.execute_transactions(
             executor,
             transaction_count,
             handle.iter_transactions(),
@@ -827,6 +829,10 @@ where
         let (_evm, result) = debug_span!(target: "engine::tree", "BlockExecutor::finish")
             .in_scope(|| executor.finish())
             .map(|(evm, result)| (evm.into_db(), result))?;
+        // Some executors append receipts during finalization (outside the tx loop).
+        // Stream any remaining receipts so post-exec receipt root can complete on the
+        // background fast path.
+        stream_receipts_to_post_exec(&post_exec, &result.receipts, last_sent_receipt);
         self.metrics.record_post_execution(post_exec_start.elapsed());
 
         // Merge transitions into bundle state
@@ -851,14 +857,15 @@ where
     /// - Streaming receipts to the post-exec worker
     /// - Collecting transaction senders for later use
     ///
-    /// Returns the executor (for finalization) and the collected senders.
+    /// Returns the executor (for finalization), the collected senders, and the number of
+    /// receipts already streamed to the post-exec worker.
     fn execute_transactions<E, Tx, InnerTx, Err>(
         &self,
         mut executor: E,
         transaction_count: usize,
         transactions: impl Iterator<Item = Result<Tx, Err>>,
         post_exec: &PostExecHandle<N::Receipt>,
-    ) -> Result<(E, Vec<Address>), BlockExecutionError>
+    ) -> Result<(E, Vec<Address>, usize), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt>,
         Tx: alloy_evm::block::ExecutableTx<E> + alloy_evm::RecoveredTx<InnerTx>,
@@ -908,16 +915,13 @@ where
             if current_len > last_sent_len {
                 // Some executors may append multiple receipts in one step.
                 // Stream all newly appended receipts to keep post-exec indexing contiguous.
-                let receipts = executor.receipts();
-                for (offset, receipt) in receipts[last_sent_len..current_len].iter().enumerate() {
-                    post_exec.push_receipt(last_sent_len + offset, receipt.clone());
-                }
+                stream_receipts_to_post_exec(post_exec, executor.receipts(), last_sent_len);
                 last_sent_len = current_len;
             }
         }
         drop(exec_span);
 
-        Ok((executor, senders))
+        Ok((executor, senders, last_sent_len))
     }
 
     /// Compute state root for the given hashed post state in parallel.
@@ -1186,11 +1190,8 @@ where
     /// If `receipt_root_bloom` is provided, it will be used instead of computing the receipt root
     /// and logs bloom from the receipts.
     ///
-    /// If `withdrawals_root` is provided, it is checked against the block header in debug builds.
-    ///
     /// The `post_exec` handle wraps background receipt-root and hashed post state computations.
     #[instrument(level = "debug", target = "engine::tree::payload_validator", skip_all)]
-    #[expect(clippy::too_many_arguments)]
     fn validate_post_execution<T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &self,
         block: &RecoveredBlock<N::Block>,
@@ -1198,7 +1199,6 @@ where
         output: &BlockExecutionOutput<N::Receipt>,
         ctx: &mut TreeCtx<'_, N>,
         receipt_root_bloom: Option<ReceiptRootBloom>,
-        withdrawals_root: Option<B256>,
         hashed_state: LazyHashedPostState,
     ) -> Result<LazyHashedPostState, InsertBlockErrorKind>
     where
@@ -1234,12 +1234,6 @@ where
             return Err(err.into())
         }
         drop(_enter);
-
-        debug_assert_eq!(
-            withdrawals_root,
-            block.withdrawals_root(),
-            "post-exec withdrawals root does not match block header"
-        );
 
         let _enter = debug_span!(target: "engine::tree::payload_validator", "validate_block_post_execution_with_hashed_state").entered();
         if let Err(err) = self
@@ -1733,6 +1727,18 @@ where
     }
 }
 
+/// Streams all receipts from `receipts[start..]` to post-exec with contiguous indices.
+#[inline]
+fn stream_receipts_to_post_exec<R: Receipt + 'static>(
+    post_exec: &PostExecHandle<R>,
+    receipts: &[R],
+    start: usize,
+) {
+    for (offset, receipt) in receipts[start..].iter().enumerate() {
+        post_exec.push_receipt(start + offset, receipt.clone());
+    }
+}
+
 /// Enum representing either block or payload being validated.
 #[derive(Debug, Clone)]
 pub enum BlockOrPayload<T: PayloadTypes> {
@@ -1820,5 +1826,43 @@ impl<T: PayloadTypes> BlockOrPayload<T> {
             Self::Payload(payload) => payload.gas_used(),
             Self::Block(block) => block.gas_used(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{proofs::calculate_receipt_root, TxReceipt};
+    use alloy_evm::block::BlockExecutionResult;
+    use alloy_primitives::Bloom;
+    use reth_ethereum_primitives::Receipt;
+    use reth_trie::HashedPostState;
+
+    #[test]
+    fn stream_receipts_to_post_exec_flushes_finish_time_receipts() {
+        let runtime = reth_tasks::Runtime::test();
+        let receipts = vec![Receipt::default(), Receipt::default()];
+
+        let mut post_exec = PostExecHandle::<Receipt>::new(&runtime, receipts.len(), None);
+
+        // Simulate the tx loop streaming receipts available before finish.
+        stream_receipts_to_post_exec(&post_exec, &receipts[..1], 0);
+
+        // Simulate an executor appending a receipt during finish.
+        let result = BlockExecutionResult {
+            receipts: receipts.clone(),
+            requests: Default::default(),
+            gas_used: 0,
+            blob_gas_used: 0,
+        };
+        stream_receipts_to_post_exec(&post_exec, &result.receipts, 1);
+        post_exec.finish(HashedPostState::default);
+
+        let receipts_with_bloom: Vec<_> = receipts.iter().map(|r| r.with_bloom_ref()).collect();
+        let expected_root = calculate_receipt_root(&receipts_with_bloom);
+        let expected_bloom =
+            receipts_with_bloom.iter().fold(Bloom::ZERO, |bloom, r| bloom | r.bloom_ref());
+
+        assert_eq!(post_exec.receipt_root_bloom(), Some((expected_root, expected_bloom)));
     }
 }
