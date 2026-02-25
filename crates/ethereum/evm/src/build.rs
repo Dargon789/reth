@@ -61,10 +61,12 @@ where
         let withdrawals = self
             .chain_spec
             .is_shanghai_active_at_timestamp(timestamp)
-            .then(|| ctx.withdrawals.map(|w| w.into_owned()).unwrap_or_default());
+            .then(|| ctx.withdrawals.map(|w| w.into_owned().into()).unwrap_or_default());
 
         let withdrawals_root =
-            withdrawals.as_deref().map(|w| proofs::calculate_withdrawals_root(w));
+            withdrawals.as_deref().map(|withdrawals: &Vec<alloy_eips::eip4895::Withdrawal>| {
+                proofs::calculate_withdrawals_root(withdrawals.as_slice())
+            });
         let requests_hash = self
             .chain_spec
             .is_prague_active_at_timestamp(timestamp)

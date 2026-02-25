@@ -60,7 +60,7 @@ impl BlockExecutorFactory for MockEvmConfig {
         &'a self,
         evm: EthEvm<&'a mut State<DB>, I, PrecompilesMap>,
         _ctx: Self::ExecutionCtx<'a>,
-    ) -> impl BlockExecutorFor<'a, Self, DB, I>
+    ) -> impl BlockExecutorFor<'a, Self, &'a mut State<DB>, I>
     where
         DB: Database + 'a,
         I: Inspector<<Self::EvmFactory as EvmFactory>::Context<&'a mut State<DB>>> + 'a,

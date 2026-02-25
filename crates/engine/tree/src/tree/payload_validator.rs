@@ -838,7 +838,7 @@ where
 
         if !self.config.precompile_cache_disabled() {
             let _span = debug_span!(target: "engine::tree", "setup_precompile_cache").entered();
-            executor.evm_mut().precompiles_mut().map_pure_precompiles(|address, precompile| {
+            executor.evm_mut().precompiles_mut().map_precompiles(|address, precompile| {
                 let metrics = self
                     .precompile_cache_metrics
                     .entry(*address)

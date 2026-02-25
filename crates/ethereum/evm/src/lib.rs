@@ -192,7 +192,11 @@ where
             parent_hash: block.header().parent_hash,
             parent_beacon_block_root: block.header().parent_beacon_block_root,
             ommers: &block.body().ommers,
-            withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+            withdrawals: block
+                .body()
+                .withdrawals
+                .as_ref()
+                .map(|withdrawals| Cow::Borrowed(withdrawals.0.as_slice())),
             extra_data: block.header().extra_data.clone(),
         })
     }
@@ -207,7 +211,9 @@ where
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             ommers: &[],
-            withdrawals: attributes.withdrawals.map(Cow::Owned),
+            withdrawals: attributes
+                .withdrawals
+                .map(|withdrawals| Cow::Owned(withdrawals.into_inner())),
             extra_data: attributes.extra_data,
         })
     }
@@ -273,6 +279,7 @@ where
             gas_limit: payload.payload.gas_limit(),
             basefee: payload.payload.saturated_base_fee_per_gas(),
             blob_excess_gas_and_price,
+            slot_num: 0,
         };
 
         Ok(EvmEnv { cfg_env, block_env })
