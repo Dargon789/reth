@@ -388,6 +388,8 @@ where
     fn on_hashed_state_update(&mut self, hashed_state_update: HashedPostState) {
         for (address, storage) in hashed_state_update.storages {
             for (slot, value) in storage.storage {
+                self.trie.record_slot_touch(address, slot);
+
                 let encoded = if value.is_zero() {
                     Vec::new()
                 } else {
@@ -501,10 +503,6 @@ where
                 continue;
             }
             let _enter = trace_span!(target: "engine::tree::payload_processor::sparse_trie", parent: &span, "storage_trie_leaf_updates", a=%address).entered();
-
-            for slot in updates.keys().copied() {
-                self.trie.record_slot_touch(*address, slot);
-            }
 
             let trie = self.trie.get_or_create_storage_trie_mut(*address);
             let fetched = self.fetched_storage_targets.entry(*address).or_default();
