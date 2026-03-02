@@ -5,9 +5,9 @@ use crate::{
     traits::SparseTrie as SparseTrieTrait,
     ParallelSparseTrie, RevealableSparseTrie,
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 use alloy_primitives::{
-    map::{B256Map, B256Set},
+    map::{B256Map, B256Set, HashMap},
     B256,
 };
 use alloy_rlp::{Decodable, Encodable};
@@ -1062,63 +1062,145 @@ struct StorageTriesPruneStats {
 }
 
 /// Key for identifying a storage slot in the global LFU cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct HotSlotKey {
     address: B256,
     slot: B256,
 }
 
-/// Global LFU tracker for hot storage slots across all storage tries.
-#[derive(Debug, Default)]
+/// Maximum frequency value. Frequencies are capped here to bound bucket storage.
+const LFU_MAX_FREQ: u16 = 255;
+
+/// Per-entry metadata stored in the LFU lookup map.
+#[derive(Debug, Clone, Copy)]
+struct LfuEntryMeta {
+    /// Current frequency (1..=`LFU_MAX_FREQ`).
+    freq: u16,
+    /// Index of this key within `buckets[freq]`.
+    pos: usize,
+}
+
+/// Bucketed LFU tracker for hot storage slots across all storage tries.
+///
+/// Uses frequency buckets for O(1) eviction and O(1) touch operations.
+#[derive(Debug)]
 struct HotSlotsLfu {
     capacity: usize,
-    frequencies: BTreeMap<HotSlotKey, u32>,
+    /// Maps each slot key to its frequency and bucket position.
+    entries: HashMap<HotSlotKey, LfuEntryMeta>,
+    /// `buckets[f]` holds all keys currently at frequency `f`.
+    /// Index 0 is unused; valid frequencies are 1..=`LFU_MAX_FREQ`.
+    buckets: Vec<Vec<HotSlotKey>>,
+    /// Smallest non-empty frequency bucket.
+    min_freq: u16,
+}
+
+impl Default for HotSlotsLfu {
+    fn default() -> Self {
+        Self {
+            capacity: 0,
+            entries: HashMap::default(),
+            buckets: (0..=LFU_MAX_FREQ).map(|_| Vec::new()).collect(),
+            min_freq: 1,
+        }
+    }
 }
 
 impl HotSlotsLfu {
-    /// Sets LFU capacity and trims entries if needed.
+    /// Sets LFU capacity and evicts lowest-frequency entries until within capacity.
     fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
-        while self.frequencies.len() > self.capacity {
-            let Some(evict_key) = self
-                .frequencies
-                .iter()
-                .min_by_key(|(key, frequency)| (**frequency, **key))
-                .map(|(key, _)| *key)
-            else {
-                break;
-            };
-            self.frequencies.remove(&evict_key);
-        }
-    }
 
-    /// Records a storage slot touch.
-    fn touch(&mut self, address: B256, slot: B256) {
-        let key = HotSlotKey { address, slot };
-        if let Some(frequency) = self.frequencies.get_mut(&key) {
-            *frequency = frequency.saturating_add(1);
+        if self.capacity == 0 {
+            self.entries.clear();
+            for b in &mut self.buckets {
+                b.clear();
+            }
+            self.min_freq = 1;
             return;
         }
 
-        if self.capacity != 0 && self.frequencies.len() >= self.capacity {
-            let Some(evict_key) = self
-                .frequencies
-                .iter()
-                .min_by_key(|(existing_key, frequency)| (**frequency, **existing_key))
-                .map(|(existing_key, _)| *existing_key)
-            else {
-                return;
-            };
-            self.frequencies.remove(&evict_key);
+        while self.entries.len() > self.capacity {
+            self.evict_one();
+        }
+    }
+
+    /// Evicts a single entry from the lowest-frequency bucket.
+    fn evict_one(&mut self) {
+        if self.entries.is_empty() {
+            self.min_freq = 1;
+            return;
         }
 
-        self.frequencies.insert(key, 1);
+        // Advance min_freq to the next non-empty bucket.
+        while (self.min_freq as usize) < self.buckets.len() &&
+            self.buckets[self.min_freq as usize].is_empty()
+        {
+            self.min_freq += 1;
+        }
+
+        if (self.min_freq as usize) >= self.buckets.len() {
+            self.min_freq = 1;
+            return;
+        }
+
+        if let Some(key) = self.buckets[self.min_freq as usize].pop() {
+            self.entries.remove(&key);
+        }
+    }
+
+    /// Records a storage slot touch. O(1) amortized.
+    fn touch(&mut self, address: B256, slot: B256) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        let key = HotSlotKey { address, slot };
+
+        if let Some(meta) = self.entries.get(&key).copied() {
+            debug_assert_eq!(self.buckets[meta.freq as usize][meta.pos], key);
+
+            let old_freq = meta.freq as usize;
+            let new_freq = meta.freq.saturating_add(1).min(LFU_MAX_FREQ);
+
+            if new_freq as usize != old_freq {
+                // Remove from old bucket via swap_remove and fix the swapped element's pos.
+                self.buckets[old_freq].swap_remove(meta.pos);
+                if let Some(&moved_key) = self.buckets[old_freq].get(meta.pos) {
+                    self.entries.get_mut(&moved_key).expect("moved key must exist").pos = meta.pos;
+                }
+
+                // Insert into new bucket.
+                let new_pos = self.buckets[new_freq as usize].len();
+                self.buckets[new_freq as usize].push(key);
+
+                let entry = self.entries.get_mut(&key).expect("key must exist");
+                entry.freq = new_freq;
+                entry.pos = new_pos;
+
+                // Update min_freq if old bucket is now empty.
+                if self.buckets[old_freq].is_empty() && old_freq == self.min_freq as usize {
+                    self.min_freq = new_freq;
+                }
+            }
+        } else {
+            // Evict if at capacity before inserting.
+            if self.entries.len() >= self.capacity {
+                self.evict_one();
+            }
+
+            // New entry at frequency 1.
+            let pos = self.buckets[1].len();
+            self.buckets[1].push(key);
+            self.entries.insert(key, LfuEntryMeta { freq: 1, pos });
+            self.min_freq = 1;
+        }
     }
 
     /// Returns retained slots grouped by address.
     fn retained_slots_by_address(&self) -> B256Map<Vec<Nibbles>> {
         let mut grouped = B256Map::<Vec<Nibbles>>::default();
-        for key in self.frequencies.keys() {
+        for key in self.entries.keys() {
             grouped.entry(key.address).or_default().push(Nibbles::unpack(key.slot));
         }
 
