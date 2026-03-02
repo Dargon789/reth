@@ -51,7 +51,9 @@ pub struct SparseStateTrie<
     /// Holds data that should be dropped after final state root is calculated.
     deferred_drops: DeferredDrops,
     /// Global LFU tracker for hot `(address, slot)` storage entries.
-    hot_slots_lfu: HotSlotsLfu,
+    hot_slots_lfu: BucketedLfu<HotSlotKey>,
+    /// Global LFU tracker for hot account entries.
+    hot_accounts_lfu: BucketedLfu<B256>,
     /// Metrics for the sparse state trie.
     #[cfg(feature = "metrics")]
     metrics: crate::metrics::SparseStateTrieMetrics,
@@ -69,7 +71,8 @@ where
             retain_updates: false,
             account_rlp_buf: Vec::with_capacity(TRIE_ACCOUNT_RLP_MAX_SIZE),
             deferred_drops: DeferredDrops::default(),
-            hot_slots_lfu: HotSlotsLfu::default(),
+            hot_slots_lfu: BucketedLfu::default(),
+            hot_accounts_lfu: BucketedLfu::default(),
             #[cfg(feature = "metrics")]
             metrics: Default::default(),
         }
@@ -191,7 +194,13 @@ where
     /// Records a storage slot access/update in the global LFU tracker.
     #[inline]
     pub fn record_slot_touch(&mut self, account: B256, slot: B256) {
-        self.hot_slots_lfu.touch(account, slot);
+        self.hot_slots_lfu.touch(HotSlotKey { address: account, slot });
+    }
+
+    /// Records an account access/update in the global LFU tracker.
+    #[inline]
+    pub fn record_account_touch(&mut self, account: B256) {
+        self.hot_accounts_lfu.touch(account);
     }
 
     /// Returns reference to bytes representing leaf value for the target account.
@@ -789,12 +798,12 @@ where
         self.storage.shrink_to(storage_nodes, storage_values);
     }
 
-    /// Prunes account/storage tries according to global LFU hot-slot retention.
+    /// Prunes account/storage tries according to global LFU retention.
     ///
     /// The `max_storage_tries` argument is interpreted as the LFU hot-slot capacity.
     ///
-    /// - Top LFU `(address, slot)` entries are retained.
-    /// - Account trie retains only paths needed for retained addresses.
+    /// - Top LFU `(address, slot)` entries are retained in storage tries.
+    /// - Account trie retains only paths for accounts tracked by the account LFU.
     /// - Storage tries retain only paths needed for retained slots.
     /// - All other revealed paths are pruned to hash stubs or fully evicted.
     ///
@@ -811,11 +820,12 @@ where
         fields(%max_depth, %max_storage_tries)
     )]
     pub fn prune(&mut self, max_depth: usize, max_storage_tries: usize) {
-        let _ = max_depth;
         self.hot_slots_lfu.set_capacity(max_storage_tries);
+        self.hot_accounts_lfu.set_capacity(1000);
         let retained = self.hot_slots_lfu.retained_slots_by_address();
-        let mut retained_account_paths: Vec<Nibbles> =
-            retained.keys().copied().map(Nibbles::unpack).collect();
+
+        let retained_account_paths: Vec<Nibbles> =
+            self.hot_accounts_lfu.keys().map(|k| Nibbles::unpack(*k)).collect();
 
         // Prune account and storage tries in parallel using the same LFU-selected set.
         rayon::join(
@@ -828,8 +838,6 @@ where
                 self.storage.prune_by_retained_slots(retained);
             },
         );
-
-        retained_account_paths.clear();
     }
 
     /// Commits the [`TrieUpdates`] to the sparse trie.
@@ -1080,22 +1088,22 @@ struct LfuEntryMeta {
     pos: usize,
 }
 
-/// Bucketed LFU tracker for hot storage slots across all storage tries.
+/// Bucketed LFU cache with O(1) eviction and O(1) touch operations.
 ///
-/// Uses frequency buckets for O(1) eviction and O(1) touch operations.
+/// Generic over the key type `K`.
 #[derive(Debug)]
-struct HotSlotsLfu {
+struct BucketedLfu<K> {
     capacity: usize,
-    /// Maps each slot key to its frequency and bucket position.
-    entries: HashMap<HotSlotKey, LfuEntryMeta>,
+    /// Maps each key to its frequency and bucket position.
+    entries: HashMap<K, LfuEntryMeta>,
     /// `buckets[f]` holds all keys currently at frequency `f`.
     /// Index 0 is unused; valid frequencies are 1..=`LFU_MAX_FREQ`.
-    buckets: Vec<Vec<HotSlotKey>>,
+    buckets: Vec<Vec<K>>,
     /// Smallest non-empty frequency bucket.
     min_freq: u16,
 }
 
-impl Default for HotSlotsLfu {
+impl<K> Default for BucketedLfu<K> {
     fn default() -> Self {
         Self {
             capacity: 0,
@@ -1106,7 +1114,7 @@ impl Default for HotSlotsLfu {
     }
 }
 
-impl HotSlotsLfu {
+impl<K: core::fmt::Debug + Copy + Eq + core::hash::Hash> BucketedLfu<K> {
     /// Sets LFU capacity and evicts lowest-frequency entries until within capacity.
     fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
@@ -1149,13 +1157,12 @@ impl HotSlotsLfu {
         }
     }
 
-    /// Records a storage slot touch. O(1) amortized.
-    fn touch(&mut self, address: B256, slot: B256) {
+    /// Records a key touch. O(1) amortized.
+    #[inline]
+    fn touch(&mut self, key: K) {
         if self.capacity == 0 {
             return;
         }
-
-        let key = HotSlotKey { address, slot };
 
         if let Some(meta) = self.entries.get(&key).copied() {
             debug_assert_eq!(self.buckets[meta.freq as usize][meta.pos], key);
@@ -1197,6 +1204,14 @@ impl HotSlotsLfu {
         }
     }
 
+    /// Returns an iterator over all retained keys.
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries.keys()
+    }
+}
+
+/// Slot-specific helpers for the `BucketedLfu<HotSlotKey>`.
+impl BucketedLfu<HotSlotKey> {
     /// Returns retained slots grouped by address.
     fn retained_slots_by_address(&self) -> B256Map<Vec<Nibbles>> {
         let mut grouped = B256Map::<Vec<Nibbles>>::default();

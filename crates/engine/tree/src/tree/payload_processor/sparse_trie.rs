@@ -414,6 +414,8 @@ where
         }
 
         for (address, account) in hashed_state_update.accounts {
+            self.trie.record_account_touch(address);
+
             // Track account as touched.
             //
             // This might overwrite an existing update, which is fine, because storage root from it
