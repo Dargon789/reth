@@ -454,7 +454,7 @@ alloy-sol-types = { version = "1.5.6", default-features = false }
 
 alloy-chains = { version = "0.2.5", default-features = false }
 alloy-eip2124 = { version = "0.2.0", default-features = false }
-alloy-eip7928 = { version = "0.3.0", default-features = false }
+alloy-eip7928 = { version = "0.3.3", default-features = false }
 alloy-evm = { version = "0.28.1", default-features = false }
 alloy-rlp = { version = "0.3.13", default-features = false, features = ["core-net"] }
 alloy-trie = { version = "0.9.4", default-features = false }
@@ -695,7 +695,7 @@ snap = "1.1.1"
 socket2 = { version = "0.6", default-features = false }
 sysinfo = { version = "0.38", default-features = false }
 tracing-journald = "0.3"
-tracing-logfmt = "=0.3.5"
+tracing-logfmt = "=0.3.7"
 tracing-samply = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false }
 tracing-tracy = "0.11"
@@ -707,7 +707,7 @@ walkdir = "2.3.3"
 vergen-git2 = "9.1.0"
 
 # networking
-ipnet = "2.11"
+ipnet = "2.12"
 
 [patch.crates-io]
 # alloy-consensus = { git = "https://github.com/alloy-rs/alloy", rev = "3049f232fbb44d1909883e154eb38ec5962f53a3" }
