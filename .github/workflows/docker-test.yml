@@ -60,11 +60,11 @@ jobs:
       # Docker build (forks)
       - name: Set up Docker Buildx
         if: steps.fork.outputs.is_fork == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build reth image (Docker)
         if: steps.fork.outputs.is_fork == 'true'
-        uses: docker/bake-action@v6
+        uses: docker/bake-action@v7
         env:
           VERGEN_GIT_SHA: ${{ steps.git.outputs.sha }}
           VERGEN_GIT_DESCRIBE: ${{ steps.git.outputs.describe }}
