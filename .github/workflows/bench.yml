@@ -77,7 +77,7 @@ jobs:
     steps:
       - name: Check org membership
         if: github.event_name == 'issue_comment'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -96,7 +96,7 @@ jobs:
 
       - name: Parse arguments
         id: args
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -215,7 +215,7 @@ jobs:
 
       - name: Acknowledge request
         id: ack
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -285,7 +285,7 @@ jobs:
 
       - name: Poll queue position
         if: steps.ack.outputs.comment-id && steps.ack.outputs.queue-position != '0'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -371,7 +371,7 @@ jobs:
 
       - name: Resolve checkout ref
         id: checkout-ref
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             if (!process.env.BENCH_PR) {
@@ -399,7 +399,7 @@ jobs:
 
       - name: Resolve job URL and update status
         if: env.BENCH_COMMENT_ID
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -499,7 +499,7 @@ jobs:
       # Build binaries
       - name: Resolve PR head branch
         id: pr-info
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             if (process.env.BENCH_PR) {
@@ -517,7 +517,7 @@ jobs:
 
       - name: Resolve refs
         id: refs
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const { execSync } = require('child_process');
@@ -574,7 +574,7 @@ jobs:
 
       - name: Update status (snapshot needed)
         if: env.BENCH_COMMENT_ID && steps.snapshot-check.outputs.needed == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -682,7 +682,7 @@ jobs:
 
       - name: Update status (running benchmarks)
         if: success() && env.BENCH_COMMENT_ID
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -865,7 +865,7 @@ jobs:
 
       - name: Compare & comment
         if: success()
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -941,7 +941,7 @@ jobs:
 
       - name: Send Slack notification (success)
         if: success()
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           SLACK_BENCH_BOT_TOKEN: ${{ secrets.SLACK_BENCH_BOT_TOKEN }}
           SLACK_BENCH_CHANNEL: ${{ secrets.SLACK_BENCH_CHANNEL }}
@@ -952,7 +952,7 @@ jobs:
 
       - name: Update status (failed)
         if: failure() && env.BENCH_COMMENT_ID
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
@@ -984,7 +984,7 @@ jobs:
 
       - name: Send Slack notification (failure)
         if: failure()
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           SLACK_BENCH_BOT_TOKEN: ${{ secrets.SLACK_BENCH_BOT_TOKEN }}
           SLACK_BENCH_CHANNEL: ${{ secrets.SLACK_BENCH_CHANNEL }}
@@ -1004,7 +1004,7 @@ jobs:
 
       - name: Update status (cancelled)
         if: cancelled() && env.BENCH_COMMENT_ID
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.DEREK_PAT }}
           script: |
